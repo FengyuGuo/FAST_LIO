@@ -59,6 +59,7 @@
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
+#include <fstream>
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
@@ -127,9 +128,12 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
-esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
+typedef esekfom::esekf<state_ikfom, 12, input_ikfom> kftype;
+kftype kf;
 state_ikfom state_point;
 vect3 pos_lid;
+
+Eigen::Matrix<double, 23, 1> cov_diag_before, cov_diag_after;
 
 nav_msgs::Path path;
 nav_msgs::Odometry odomAftMapped;
@@ -139,11 +143,28 @@ geometry_msgs::PoseStamped msg_body_pose;
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
 
+std::ofstream ofs;
+
 void SigHandle(int sig)
 {
     flg_exit = true;
     ROS_WARN("catch sig %d", sig);
     sig_buffer.notify_all();
+}
+
+void dump_lio_for_balm(std::ofstream& ofs)
+{
+    std::cout << "dump balm pose!\n";
+    Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+    T.block<3, 3>(0, 0) = state_point.rot.toRotationMatrix();
+    T(0, 3) = state_point.pos(0);
+    T(1, 3) = state_point.pos(1);
+    T(2, 3) = state_point.pos(2);
+    T(3, 3) = Measures.lidar_beg_time - first_lidar_time;
+    Eigen::IOFormat CommaFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ",\n");
+
+    ofs << T.format(CommaFormat) << std::endl;
+    ofs.flush();
 }
 
 inline void dump_lio_state_to_log(FILE *fp)  
@@ -158,8 +179,22 @@ inline void dump_lio_state_to_log(FILE *fp)
     fprintf(fp, "%lf %lf %lf ", state_point.bg(0), state_point.bg(1), state_point.bg(2));    // Bias_g  
     fprintf(fp, "%lf %lf %lf ", state_point.ba(0), state_point.ba(1), state_point.ba(2));    // Bias_a  
     fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1], state_point.grav[2]); // Bias_a  
+    // kftype::cov P = kf.get_P();
+    // for(int i = 0; i < P.cols(); i++)
+    // {
+    //     fprintf(fp, "%lf ", std::sqrt(P(i, i)));
+    // }
     fprintf(fp, "\r\n");  
     fflush(fp);
+}
+
+inline void dump_cov(std::ostream& os, const kftype::cov& P)
+{
+    for(int i = 0; i < P.cols(); i++)
+    {
+        os << setw(20) << P(i, i)  << " ";
+    }
+    os << std::endl;
 }
 
 void pointBodyToWorld_ikfom(PointType const * const pi, PointType * const po, state_ikfom &s)
@@ -501,11 +536,16 @@ void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
         int size = feats_undistort->points.size();
         PointCloudXYZI::Ptr laserCloudWorld( \
                         new PointCloudXYZI(size, 1));
-
+        PointCloudXYZI::Ptr laserCloudIMU( \
+                        new PointCloudXYZI(size, 1));
         for (int i = 0; i < size; i++)
         {
             RGBpointBodyToWorld(&feats_undistort->points[i], \
                                 &laserCloudWorld->points[i]);
+
+            RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
+                                &laserCloudIMU->points[i]);
+            
         }
         *pcl_wait_save += *laserCloudWorld;
 
@@ -513,13 +553,17 @@ void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
         scan_wait_num ++;
         if (pcl_wait_save->size() > 0 && pcd_save_interval > 0  && scan_wait_num >= pcd_save_interval)
         {
-            pcd_index ++;
+            
             string all_points_dir(string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
             pcl::PCDWriter pcd_writer;
             cout << "current scan saved to /PCD/" << all_points_dir << endl;
             pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
             pcl_wait_save->clear();
             scan_wait_num = 0;
+
+            string balm_pcd_path(string(string(ROOT_DIR) + "PCD_balm/full") + to_string(pcd_index) + string(".pcd"));
+            pcd_writer.writeBinary(balm_pcd_path, *laserCloudIMU);
+            pcd_index ++;
         }
     }
 }
@@ -787,6 +831,8 @@ int main(int argc, char** argv)
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
+
+    ofs.open(root_dir + "/Log/balm.txt", ios::out);
     
     path.header.stamp    = ros::Time::now();
     path.header.frame_id ="camera_init";
@@ -829,6 +875,11 @@ int main(int argc, char** argv)
     fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"),ios::out);
     fout_out.open(DEBUG_FILE_DIR("mat_out.txt"),ios::out);
     fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"),ios::out);
+
+    ofstream cov_before, cov_after, cov_delta;
+    cov_before.open(DEBUG_FILE_DIR("cov_before.txt"), ios::out);
+    cov_after.open(DEBUG_FILE_DIR("cov_after.txt"), ios::out);
+    cov_delta.open(DEBUG_FILE_DIR("cov_delta.txt"), ios::out);
     if (fout_pre && fout_out)
         cout << "~~~~"<<ROOT_DIR<<" file opened" << endl;
     else
@@ -880,6 +931,14 @@ int main(int argc, char** argv)
 
             p_imu->Process(Measures, kf, feats_undistort);
             state_point = kf.get_x();
+            if(runtime_pos_log)
+            {
+                kftype::cov P_before = kf.get_P();
+                dump_cov(cov_before, P_before);
+                cov_diag_before = P_before.diagonal().cwiseSqrt();
+            }
+            
+
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
@@ -932,7 +991,7 @@ int main(int argc, char** argv)
             fout_pre<<setw(20)<<Measures.lidar_beg_time - first_lidar_time<<" "<<euler_cur.transpose()<<" "<< state_point.pos.transpose()<<" "<<ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<< " " << state_point.vel.transpose() \
             <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<< endl;
 
-            if(0) // If you need to see map point, change to "if(1)"
+            if(1) // If you need to see map point, change to "if(1)"
             {
                 PointVector ().swap(ikdtree.PCL_Storage);
                 ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
@@ -973,8 +1032,8 @@ int main(int argc, char** argv)
             if (path_en)                         publish_path(pubPath);
             if (scan_pub_en || pcd_save_en)      publish_frame_world(pubLaserCloudFull);
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body);
-            // publish_effect_world(pubLaserCloudEffect);
-            // publish_map(pubLaserCloudMap);
+            publish_effect_world(pubLaserCloudEffect);
+            publish_map(pubLaserCloudMap);
 
             /*** Debug variables ***/
             if (runtime_pos_log)
@@ -1004,6 +1063,15 @@ int main(int argc, char** argv)
                 fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " " << euler_cur.transpose() << " " << state_point.pos.transpose()<< " " << ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<<" "<< state_point.vel.transpose() \
                 <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
                 dump_lio_state_to_log(fp);
+                dump_lio_for_balm(ofs);
+
+                kftype::cov P_after = kf.get_P();
+                dump_cov(cov_after, P_after);
+
+                cov_diag_after = P_after.diagonal().cwiseSqrt();
+
+                Eigen::Matrix<double, 23, 1> delta_P = cov_diag_before - cov_diag_after;
+                cov_delta << Measures.lidar_beg_time - first_lidar_time << " " << delta_P.transpose() << std::endl;
             }
         }
 
@@ -1026,6 +1094,10 @@ int main(int argc, char** argv)
     fout_out.close();
     fout_pre.close();
 
+    cov_before.close();
+    cov_after.close();
+    cov_delta.clear();
+
     if (runtime_pos_log)
     {
         vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;    
@@ -1043,6 +1115,9 @@ int main(int argc, char** argv)
         }
         fclose(fp2);
     }
+
+    ofs.flush();
+    ofs.close();
 
     return 0;
 }

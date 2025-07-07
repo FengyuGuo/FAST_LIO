@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 
 
 #######for ikfom
+# plt.figure()
 fig, axs = plt.subplots(4,2)
 lab_pre = ['', 'pre-x', 'pre-y', 'pre-z']
 lab_out = ['', 'out-x', 'out-y', 'out-z']
@@ -29,6 +30,31 @@ for j in range(8):
     axs[j%4, j/4].grid()
     axs[j%4, j/4].legend()
 plt.grid()
+
+# # plt.figure()
+# #######for covariance analyze######
+# lab_cov=['x', 'y', 'z']
+# state=np.loadtxt('pos_log.txt')
+# time=state[:,0]
+
+# fig, axs = plt.subplots(2, 1)
+
+# axs[0].set_title('attitude_cov')
+# axs[1].set_title('pos_cov')
+
+# for i in range(25, 28):
+#     axs[0].plot(time, state[:, i], '.-', label=lab_cov[i-25])
+# for i in range(28, 31):
+#     axs[1].plot(time, state[:, i], '.-', label=lab_cov[i-28])
+
+# axs[0].legend()
+# axs[1].legend()
+
+
+#######for delta cov
+
+cov_delta=np.loadtxt('cov_delta.txt')
+
 #######for ikfom#######
 
 
@@ -92,3 +118,5 @@ plt.grid()
 # plt.grid()
 # plt.savefig("time.pdf", dpi=1200)
 plt.show()
+
+
