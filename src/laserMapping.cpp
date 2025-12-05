@@ -92,6 +92,7 @@ double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
+int balm_index = 0;
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
@@ -145,6 +146,8 @@ shared_ptr<ImuProcess> p_imu(new ImuProcess());
 
 std::ofstream ofs;
 
+bool dump_for_balm = false;
+
 void SigHandle(int sig)
 {
     flg_exit = true;
@@ -170,7 +173,7 @@ void dump_lio_for_balm(std::ofstream& ofs)
 inline void dump_lio_state_to_log(FILE *fp)  
 {
     V3D rot_ang(Log(state_point.rot.toRotationMatrix()));
-    fprintf(fp, "%lf ", Measures.lidar_beg_time - first_lidar_time);
+    fprintf(fp, "%lf ", Measures.lidar_beg_time * 1.0e9);
     fprintf(fp, "%lf %lf %lf ", rot_ang(0), rot_ang(1), rot_ang(2));                   // Angle
     fprintf(fp, "%lf %lf %lf ", state_point.pos(0), state_point.pos(1), state_point.pos(2)); // Pos  
     fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // omega  
@@ -566,6 +569,20 @@ void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
             pcd_index ++;
         }
     }
+    if (dump_for_balm)
+    {
+        int size = feats_undistort->points.size();
+        PointCloudXYZI::Ptr laserCloudIMU( \
+                        new PointCloudXYZI(size, 1));
+        for (int i = 0; i < size; i++)
+        {
+            RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
+                                &laserCloudIMU->points[i]);
+        }
+        string balm_pcd_path(string(string(ROOT_DIR) + "PCD_balm/full") + to_string(balm_index++) + string(".pcd"));
+        pcl::PCDWriter pcd_writer;
+        pcd_writer.writeBinary(balm_pcd_path, *laserCloudIMU);
+    }
 }
 
 void publish_frame_body(const ros::Publisher & pubLaserCloudFull_body)
@@ -830,9 +847,10 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+    nh.param<bool>("export_for_balm", dump_for_balm, false);
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
 
-    ofs.open(root_dir + "/Log/balm.txt", ios::out);
+    ofs.open(root_dir + "/Log/alidarPose.csv", ios::out);
     
     path.header.stamp    = ros::Time::now();
     path.header.frame_id ="camera_init";
@@ -1030,7 +1048,7 @@ int main(int argc, char** argv)
             
             /******* Publish points *******/
             if (path_en)                         publish_path(pubPath);
-            if (scan_pub_en || pcd_save_en)      publish_frame_world(pubLaserCloudFull);
+            if (scan_pub_en || pcd_save_en || dump_for_balm)      publish_frame_world(pubLaserCloudFull);
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body);
             publish_effect_world(pubLaserCloudEffect);
             publish_map(pubLaserCloudMap);

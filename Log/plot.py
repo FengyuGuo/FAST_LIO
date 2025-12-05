@@ -31,6 +31,22 @@ for j in range(8):
     axs[j%4, j/4].legend()
 plt.grid()
 
+pos = a_out[:, 4:7]
+
+
+
+pos_diff = np.diff(pos, 1, axis = 0)
+
+plt.figure()
+plt.plot(time[1:], pos_diff[:, 0])
+plt.plot(time[1:], pos_diff[:, 1])
+plt.plot(time[1:], pos_diff[:, 2])
+
+pos_diff_norm = np.linalg.norm(pos_diff, axis=1)
+distance = np.sum(pos_diff_norm)
+print("Total distance traveled:", distance)
+
+
 # # plt.figure()
 # #######for covariance analyze######
 # lab_cov=['x', 'y', 'z']
